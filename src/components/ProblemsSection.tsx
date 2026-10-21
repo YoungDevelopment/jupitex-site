@@ -136,6 +136,7 @@ export default function ProblemsSection() {
   const scrollAnimRafRef = useRef<number | null>(null);
   const touchStartYRef = useRef(0);
   const touchConsumedRef = useRef(false);
+  const pendingTouchEndRef = useRef<(() => void) | null>(null);
 
   // Custom smooth window scroll animator (immune to e.preventDefault() cancellation)
   const animateWindowScrollTo = useCallback(
@@ -168,25 +169,15 @@ export default function ProblemsSection() {
     []
   );
 
-  // Transition directly to a slide (0, 1, or 2)
-  const goToStep = useCallback(
-    (nextStep: number) => {
-      const clamped = clamp(nextStep, 0, 2);
-      activeStepRef.current = clamped;
-      setActiveStep(clamped);
-      targetStepFloatRef.current = clamped;
-      targetEntryFadeRef.current = 1;
-      scrollImpulseRef.current = 1;
-
-      if (sectionRef.current) {
-        const sectionTop = sectionRef.current.offsetTop;
-        if (Math.abs(window.scrollY - sectionTop) > 8) {
-          animateWindowScrollTo(sectionTop, 560);
-        }
-      }
-    },
-    [animateWindowScrollTo]
-  );
+  // Slide changes only crossfade the text. The window stays put.
+  const goToStep = useCallback((nextStep: number) => {
+    const clamped = clamp(nextStep, 0, 2);
+    activeStepRef.current = clamped;
+    setActiveStep(clamped);
+    targetStepFloatRef.current = clamped;
+    targetEntryFadeRef.current = 1;
+    scrollImpulseRef.current = 1;
+  }, []);
 
   // Unified 1-Swipe-Per-Slide Wheel Controller:
   // Hero <-> Slide 1 <-> Slide 2 <-> Slide 3
@@ -307,12 +298,15 @@ export default function ProblemsSection() {
     return () => window.removeEventListener("wheel", onWheel);
   }, [animateWindowScrollTo, goToStep]);
 
-  // Unified 1-Swipe-Per-Slide Mobile Touch Controller
+  // Unified 1-Swipe-Per-Slide Mobile Touch Controller.
+  // In-section swipes only crossfade. Window movement waits until the finger lifts
+  // so iOS does not cancel the animation and spring the page back.
   useEffect(() => {
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches[0]) {
         touchStartYRef.current = e.touches[0].clientY;
         touchConsumedRef.current = false;
+        pendingTouchEndRef.current = null;
       }
     };
 
@@ -325,6 +319,7 @@ export default function ProblemsSection() {
 
       const currentY = e.touches[0].clientY;
       const deltaY = touchStartYRef.current - currentY;
+      const absDelta = Math.abs(deltaY);
 
       const isInHero = scrollY < sectionTop - vh * 0.35;
       const isInProblems =
@@ -336,9 +331,14 @@ export default function ProblemsSection() {
         return;
       }
 
-      if (Math.abs(deltaY) < 28) return;
+      // Stop the browser from scrolling as soon as direction is clear.
+      // Once a scroll has started, the event is no longer cancelable — do not
+      // fight it with a programmatic scrollTo.
+      if (absDelta >= 8 && e.cancelable) {
+        e.preventDefault();
+      }
 
-      e.preventDefault();
+      if (absDelta < 28 || !e.cancelable) return;
 
       const now = performance.now();
       if (touchConsumedRef.current || now < lockUntilRef.current) {
@@ -351,25 +351,29 @@ export default function ProblemsSection() {
 
       if (isInHero) {
         if (deltaY > 0) {
-          activeStepRef.current = 0;
-          setActiveStep(0);
-          targetStepFloatRef.current = 0;
-          currentStepFloatRef.current = 0;
-          setDisplayStepFloat(0);
-          currentEntryFadeRef.current = 0;
-          setEntryFade(0);
-          targetEntryFadeRef.current = 1;
-          animateWindowScrollTo(sectionTop, 600);
+          pendingTouchEndRef.current = () => {
+            activeStepRef.current = 0;
+            setActiveStep(0);
+            targetStepFloatRef.current = 0;
+            currentStepFloatRef.current = 0;
+            setDisplayStepFloat(0);
+            currentEntryFadeRef.current = 0;
+            setEntryFade(0);
+            targetEntryFadeRef.current = 1;
+            animateWindowScrollTo(sectionTop, 600);
+          };
         }
         return;
       }
 
       if (isAtTopOfAudit && deltaY < 0) {
-        activeStepRef.current = 2;
-        setActiveStep(2);
-        targetStepFloatRef.current = 2;
-        targetEntryFadeRef.current = 1;
-        animateWindowScrollTo(sectionTop, 600);
+        pendingTouchEndRef.current = () => {
+          activeStepRef.current = 2;
+          setActiveStep(2);
+          targetStepFloatRef.current = 2;
+          targetEntryFadeRef.current = 1;
+          animateWindowScrollTo(sectionTop, 600);
+        };
         return;
       }
 
@@ -377,23 +381,39 @@ export default function ProblemsSection() {
         if (activeStepRef.current < 2) {
           goToStep(activeStepRef.current + 1);
         } else {
-          animateWindowScrollTo(auditTop, 620);
+          pendingTouchEndRef.current = () => {
+            animateWindowScrollTo(auditTop, 620);
+          };
         }
+      } else if (activeStepRef.current > 0) {
+        goToStep(activeStepRef.current - 1);
       } else {
-        if (activeStepRef.current > 0) {
-          goToStep(activeStepRef.current - 1);
-        } else {
+        pendingTouchEndRef.current = () => {
           targetEntryFadeRef.current = 0;
           animateWindowScrollTo(0, 600);
-        }
+        };
       }
+    };
+
+    const onTouchEnd = () => {
+      const run = pendingTouchEndRef.current;
+      pendingTouchEndRef.current = null;
+      run?.();
+    };
+
+    const onTouchCancel = () => {
+      pendingTouchEndRef.current = null;
     };
 
     window.addEventListener("touchstart", onTouchStart, { passive: true });
     window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchCancel, { passive: true });
     return () => {
       window.removeEventListener("touchstart", onTouchStart);
       window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchCancel);
     };
   }, [animateWindowScrollTo, goToStep]);
 
@@ -537,7 +557,7 @@ export default function ProblemsSection() {
       ref={sectionRef}
       id="problems"
       aria-label="Problems"
-      className="relative w-full h-screen min-h-[600px] bg-white select-none overflow-hidden"
+      className="relative w-full h-screen min-h-[600px] bg-white select-none overflow-hidden touch-none"
     >
       {/* Full-Viewport Centered Stage */}
       <div
@@ -558,7 +578,7 @@ export default function ProblemsSection() {
         />
 
         {/* 2. Three Vertical Progress Dots on the Right Side */}
-        <div className="flex flex-col items-center gap-2.5 absolute right-4 sm:right-8 lg:right-14 top-1/2 -translate-y-1/2 z-30">
+        <div className="hidden md:flex flex-col items-center gap-2.5 absolute right-4 sm:right-8 lg:right-14 top-1/2 -translate-y-1/2 z-30">
           {PROBLEMS_DATA.map((s, idx) => {
             const isActive = activeStep === idx;
             return (
